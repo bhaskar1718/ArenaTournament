@@ -16,5 +16,6 @@ class Settings(BaseSettings):
     razorpay_key_id:str=""
     razorpay_key_secret:str=""
     razorpay_webhook_secret:str=""
+    upi_id:str=""
     model_config=SettingsConfigDict(env_file="../.env", extra="ignore", case_sensitive=False)
 settings=Settings()

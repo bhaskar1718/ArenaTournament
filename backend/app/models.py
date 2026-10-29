@@ -34,6 +34,7 @@ class Tournament(Base):
     description:Mapped[str]=mapped_column(Text,default="")
     room_id:Mapped[str]=mapped_column(String(120),default="")
     room_password:Mapped[str]=mapped_column(String(120),default="")
+    room_time:Mapped[str]=mapped_column(String(120),default="")
 class Registration(Base):
     __tablename__="registrations"
     __table_args__=(UniqueConstraint("user_id","tournament_id",name="uq_user_tournament"),)
@@ -41,9 +42,12 @@ class Registration(Base):
     user_id:Mapped[int]=mapped_column(ForeignKey("users.id"),index=True)
     tournament_id:Mapped[int]=mapped_column(ForeignKey("tournaments.id"),index=True)
     status:Mapped[str]=mapped_column(String(30),default="pending_payment")
+    approval_status:Mapped[str]=mapped_column(String(20),default="pending")
     game_uid:Mapped[str]=mapped_column(String(80),default="")
     game_name:Mapped[str]=mapped_column(String(120),default="")
     phonepe_number:Mapped[str]=mapped_column(String(20),default="")
+    transaction_id:Mapped[str]=mapped_column(String(120),default="")
+    kills:Mapped[int]=mapped_column(Integer,default=0)
     created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
     user=relationship("User")
     tournament=relationship("Tournament")

@@ -178,13 +178,25 @@ def me(
         raise HTTPException(401, "Login required")
 
     try:
-        uid = int(
-            jwt.decode(
-                creds.credentials,
-                settings.jwt_secret,
-                algorithms=["HS256"],
-            )["sub"]
+        claims = jwt.decode(
+            creds.credentials,
+            settings.jwt_secret,
+            algorithms=["HS256"],
         )
+    except Exception:
+        raise HTTPException(401, "Invalid or expired session")
+
+    if claims.get("role") == "static_admin":
+        return User(
+            id=0,
+            name=settings.admin_username,
+            email="admin@arena.local",
+            is_admin=True,
+            is_verified=True,
+        )
+
+    try:
+        uid = int(claims["sub"])
     except Exception:
         raise HTTPException(401, "Invalid or expired session")
 
@@ -236,6 +248,22 @@ class PayVerify(BaseModel):
     razorpay_signature: str
 
 
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+
+class RegistrationInput(BaseModel):
+    game_uid: str = Field(min_length=1, max_length=80)
+    game_name: str = Field(min_length=1, max_length=120)
+    phonepe_number: str = Field(min_length=10, max_length=20)
+
+
+class RoomInfo(BaseModel):
+    room_id: str = Field(max_length=120)
+    room_password: str = Field(max_length=120)
+
+
 class NewTournament(BaseModel):
     title: str
     game: str
@@ -249,6 +277,40 @@ class NewTournament(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/auth/admin-login")
+def static_admin_login(p: AdminLogin):
+    if not settings.admin_username or not settings.admin_password:
+        raise HTTPException(
+            503,
+            "Set ADMIN_USERNAME and ADMIN_PASSWORD in backend environment variables.",
+        )
+    if (
+        not hmac.compare_digest(p.username, settings.admin_username)
+        or not hmac.compare_digest(p.password, settings.admin_password)
+    ):
+        raise HTTPException(401, "Invalid admin username or password.")
+
+    access_token = jwt.encode(
+        {
+            "sub": "static-admin",
+            "role": "static_admin",
+            "exp": datetime.now(timezone.utc)
+            + timedelta(minutes=settings.jwt_expire_minutes),
+        },
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+    return {
+        "access_token": access_token,
+        "user": {
+            "id": 0,
+            "name": settings.admin_username,
+            "email": "admin@arena.local",
+            "is_admin": True,
+        },
+    }
 
 
 @app.post("/auth/signup")
@@ -411,6 +473,7 @@ def list_tournaments(db: Session = Depends(get_db)):
 @app.post("/tournaments/{tid}/register")
 def register(
     tid: int,
+    p: RegistrationInput,
     db: Session = Depends(get_db),
     u: User = Depends(me),
 ):
@@ -427,6 +490,10 @@ def register(
     )
 
     if existing:
+        existing.game_uid = p.game_uid.strip()
+        existing.game_name = p.game_name.strip()
+        existing.phonepe_number = p.phonepe_number.strip()
+        db.commit()
         return {
             "registration_id": existing.id,
             "status": existing.status,
@@ -457,6 +524,9 @@ def register(
             if tournament.entry_fee_paise
             else "confirmed"
         ),
+        game_uid=p.game_uid.strip(),
+        game_name=p.game_name.strip(),
+        phonepe_number=p.phonepe_number.strip(),
     )
 
     db.add(registration)
@@ -658,9 +728,13 @@ def registrations(
     return [
         {
             "id": r.id,
+            "name": r.user.name,
             "email": r.user.email,
             "tournament": r.tournament.title,
             "status": r.status,
+            "game_uid": r.game_uid,
+            "game_name": r.game_name,
+            "phonepe_number": r.phonepe_number,
             "created_at": r.created_at.isoformat(),
         }
         for r in db.scalars(
@@ -706,3 +780,45 @@ def tournament_status(
     db.commit()
 
     return {"id": tournament.id, "status": tournament.status}
+
+
+@app.patch("/admin/tournaments/{tid}/room")
+def update_room(
+    tid: int,
+    p: RoomInfo,
+    db: Session = Depends(get_db),
+    _: User = Depends(admin),
+):
+    tournament = db.get(Tournament, tid)
+    if not tournament:
+        raise HTTPException(404, "Tournament not found.")
+
+    tournament.room_id = p.room_id.strip()
+    tournament.room_password = p.room_password.strip()
+    db.commit()
+    return {"id": tournament.id, "room_updated": True}
+
+
+@app.get("/my/registrations")
+def my_registrations(
+    db: Session = Depends(get_db),
+    u: User = Depends(me),
+):
+    rows = db.scalars(
+        select(Registration)
+        .where(
+            Registration.user_id == u.id,
+            Registration.status == "confirmed",
+        )
+        .order_by(Registration.id.desc())
+    ).all()
+    return [
+        {
+            "id": r.id,
+            "tournament": r.tournament.title,
+            "status": r.status,
+            "room_id": r.tournament.room_id,
+            "room_password": r.tournament.room_password,
+        }
+        for r in rows
+    ]

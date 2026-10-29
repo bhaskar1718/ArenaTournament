@@ -6,6 +6,8 @@ class Settings(BaseSettings):
     jwt_secret:str="dev-secret-change-before-production-123456789"
     jwt_expire_minutes:int=60
     admin_email:str="admin@example.com"
+    admin_username:str=""
+    admin_password:str=""
     smtp_host:str=""
     smtp_port:int=587
     smtp_username:str=""

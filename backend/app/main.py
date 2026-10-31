@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select,func
 import jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel,EmailStr,Field
+from pydantic import BaseModel,EmailStr,Field,field_validator
 from .config import settings
 from .db import Base,engine,get_db
 from .models import User,Otp,Tournament,Registration,Payment
@@ -63,7 +63,15 @@ class EmailOnly(BaseModel): email:EmailStr
 class Reset(BaseModel): email:EmailStr;otp:str;new_password:str=Field(min_length=8,max_length=128)
 class UpiSubmission(BaseModel): registration_id:int;transaction_id:str=Field(min_length=4,max_length=120)
 class AdminLogin(BaseModel): username:str;password:str
-class RegistrationInput(BaseModel): game_uid:str=Field(min_length=1,max_length=80);game_name:str=Field(min_length=1,max_length=120);phonepe_number:str=Field(min_length=10,max_length=20)
+class RegistrationInput(BaseModel):
+    game_uid:str=Field(min_length=1,max_length=80)
+    game_name:str=Field(min_length=1,max_length=120)
+    phonepe_number:str=Field(min_length=10,max_length=10,pattern=r"^[0-9]{10}$")
+    allow_duplicate:bool=False
+    @field_validator("game_uid","game_name","phonepe_number")
+    @classmethod
+    def trim_values(cls,v):
+        return v.strip()
 class RoomInfo(BaseModel): room_id:str=Field(max_length=120);room_password:str=Field(max_length=120);room_time:str=Field(max_length=120)
 class NewTournament(BaseModel):
     title:str;game:str;starts_at:str;entry_fee_paise:int=Field(ge=0);prize_text:str;slots:int=Field(ge=2);description:str=""
@@ -119,11 +127,10 @@ def list_tournaments(db:Session=Depends(get_db)):
 def register(tid:int,p:RegistrationInput,db:Session=Depends(get_db),u:User=Depends(me)):
     t=db.get(Tournament,tid)
     if not t or t.status!="open": raise HTTPException(404,"Tournament not open.")
-    existing=db.scalar(select(Registration).where(Registration.user_id==u.id,Registration.tournament_id==tid))
-    if existing:
-        existing.game_uid=p.game_uid;existing.game_name=p.game_name;existing.phonepe_number=p.phonepe_number;db.commit()
-        return {"registration_id":existing.id,"status":existing.status}
-    count=db.scalar(select(func.count()).select_from(Registration).where(Registration.tournament_id==tid,Registration.status.in_(["confirmed","pending_payment"]))) or 0
+    previous=db.scalar(select(func.count()).select_from(Registration).where(Registration.user_id==u.id,Registration.tournament_id==tid)) or 0
+    if previous and not p.allow_duplicate:
+        raise HTTPException(409,"You have already registered for this tournament. Do you want to register again?")
+    count=db.scalar(select(func.count()).select_from(Registration).where(Registration.tournament_id==tid,Registration.status.in_(["confirmed","pending_payment","pending_verification"]),Registration.approval_status!="rejected")) or 0
     if count>=t.slots: raise HTTPException(409,"Tournament is full.")
     r=Registration(user_id=u.id,tournament_id=tid,status="pending_payment" if t.entry_fee_paise else "confirmed",game_uid=p.game_uid,game_name=p.game_name,phonepe_number=p.phonepe_number);db.add(r);db.commit();db.refresh(r)
     return {"registration_id":r.id,"status":r.status}
@@ -141,6 +148,8 @@ def submit_upi(p:UpiSubmission,db:Session=Depends(get_db),u:User=Depends(me)):
     r=db.get(Registration,p.registration_id)
     if not r or r.user_id!=u.id: raise HTTPException(404,"Registration not found.")
     if r.status=="confirmed": raise HTTPException(409,"Payment already verified.")
+    if r.status=="pending_verification": raise HTTPException(409,"Your transaction ID is already submitted. Please wait for admin verification.")
+    if not p.transaction_id.strip(): raise HTTPException(422,"Enter a valid UPI transaction ID / UTR.")
     r.transaction_id=p.transaction_id.strip()
     r.status="pending_verification"
     r.approval_status="pending"
@@ -205,5 +214,21 @@ def update_room(tid:int,p:RoomInfo,db:Session=Depends(get_db),_:User=Depends(adm
     return {"id":t.id,"room_updated":True}
 @app.get("/my/registrations")
 def my_registrations(db:Session=Depends(get_db),u:User=Depends(me)):
-    rows=db.scalars(select(Registration).where(Registration.user_id==u.id,Registration.status=="confirmed",Registration.approval_status=="approved").order_by(Registration.id.desc())).all()
-    return [{"id":r.id,"tournament":r.tournament.title,"status":r.status,"approval_status":r.approval_status,"room_id":r.tournament.room_id,"room_password":r.tournament.room_password,"room_time":r.tournament.room_time,"kills":r.kills} for r in rows]
+    rows=db.scalars(select(Registration).where(Registration.user_id==u.id).order_by(Registration.id.desc())).all()
+    result=[]
+    for r in rows:
+        approved=(r.status=="confirmed" and r.approval_status=="approved")
+        # Only approved participants receive the approved roster and room information.
+        participants=[]
+        if approved:
+            approved_rows=db.scalars(
+                select(Registration).where(
+                    Registration.tournament_id==r.tournament_id,
+                    Registration.status=="confirmed",
+                    Registration.approval_status=="approved"
+                ).order_by(Registration.game_name.asc(),Registration.id.asc())
+            ).all()
+            participants=[{"name":x.user.name,"game_name":x.game_name,"game_uid":x.game_uid,"kills":x.kills} for x in approved_rows]
+        room_configured=bool(r.tournament.room_id.strip() and r.tournament.room_password.strip() and r.tournament.room_time.strip())
+        result.append({"id":r.id,"tournament_id":r.tournament_id,"tournament":r.tournament.title,"entry_fee_paise":r.tournament.entry_fee_paise,"status":r.status,"approval_status":r.approval_status,"transaction_id":r.transaction_id,"created_at":r.created_at.isoformat(),"game_uid":r.game_uid,"game_name":r.game_name,"room_configured":room_configured if approved else False,"room_message":("Room details will be updated by the admin once they are created." if approved and not room_configured else None),"participants":participants if approved else [],"room_id":r.tournament.room_id if approved and room_configured else None,"room_password":r.tournament.room_password if approved and room_configured else None,"room_time":r.tournament.room_time if approved and room_configured else None,"kills":r.kills if approved else None})
+    return result

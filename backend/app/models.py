@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import String,Integer,Boolean,DateTime,ForeignKey,UniqueConstraint,Text
+from sqlalchemy import String,Integer,Boolean,DateTime,ForeignKey,Text
 from sqlalchemy.orm import Mapped,mapped_column,relationship
 from .db import Base
 def now(): return datetime.now(timezone.utc)
@@ -37,7 +37,6 @@ class Tournament(Base):
     room_time:Mapped[str]=mapped_column(String(120),default="")
 class Registration(Base):
     __tablename__="registrations"
-    __table_args__=(UniqueConstraint("user_id","tournament_id",name="uq_user_tournament"),)
     id:Mapped[int]=mapped_column(primary_key=True)
     user_id:Mapped[int]=mapped_column(ForeignKey("users.id"),index=True)
     tournament_id:Mapped[int]=mapped_column(ForeignKey("tournaments.id"),index=True)
